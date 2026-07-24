@@ -1,0 +1,512 @@
+import turtle
+from collections import deque
+import json
+
+# Global variables
+game_state = "MENU" # MENU, PLAYING
+save_file = "save.json"
+
+def draw_menu():
+    drawer.clear()
+    buttons = [(-100, 120, "Start Game"), (-100, 50, "New Game"), 
+               (-100, -20, "Save Game"), (-100, -90, "Documentation")]
+    for x, y, text in buttons:
+        # Box
+        drawer.penup(); drawer.goto(x, y); drawer.color("#34495e"); drawer.begin_fill()
+        for _ in range(2): drawer.forward(200); drawer.right(90); drawer.forward(50); drawer.right(90)
+        drawer.end_fill()
+        # Text
+        drawer.goto(x + 100, y - 35); drawer.color("white")
+        drawer.write(text, align="center", font=("Arial", 16, "bold"))
+    screen.update()
+
+def handle_menu_click(x, y):
+    global game_state
+    if game_state != "MENU": return
+    
+    if 120 < y < 170: # Start
+        game_state = "PLAYING"; draw_game()
+    elif 50 < y < 100: # New
+        reset_current_stage(); game_state = "PLAYING"
+    elif -20 < y < 30: # Save
+        save_game()
+    elif -90 < y < -40: # Docs
+        print("CONTROLS: WASD to move, E to mine wall, R to respawn at current stage.")
+
+def trigger_upload_sequence():
+    global game_state
+    game_state = "UPLOAD"
+    drawer.clear()
+    screen.bgcolor("black")
+    
+    # Narrative sequence (can be customized)
+    messages = [
+        "系统检测：正在执行意识上传...",
+        "正在将 Green Block 压缩为共享记忆碎片...",
+        "正在寻找互联网的记忆节点...",
+        "上传进度: 100% - 完成",
+        "---",
+        "如果有人还能记得我...",
+        "那我应该还存在。",
+        "---",
+        "感谢您的见证。"
+    ]
+    
+    drawer.color("white")
+    y_pos = 100
+    for msg in messages:
+        drawer.penup()
+        drawer.goto(0, y_pos)
+        drawer.write(msg, align="center", font=("Arial", 12, "normal"))
+        y_pos -= 30
+    
+    screen.update()
+
+def save_game():
+    data = {
+        "stage": current_stage,
+        "hp": player_hp,
+        "switches": switches_activated,
+        "gate": gate_unlocked
+    }
+    with open(save_file, "w") as f:
+        json.dump(data, f)
+    show_ui_message("GAME SAVED!", "#2ecc71")
+
+def load_game():
+    global current_stage, player_hp, switches_activated, gate_unlocked
+    try:
+        with open(save_file, "r") as f:
+            data = json.load(f)
+            current_stage = data["stage"]
+            player_hp = data["hp"]
+            switches_activated = data["switches"]
+            gate_unlocked = data["gate"]
+        show_ui_message("LOAD SUCCESSFUL", "#2ecc71")
+    except FileNotFoundError:
+        show_ui_message("NO SAVE FOUND", "#e74c3c")
+# --- 1. 初始化游戏画布与全局变量 ---
+screen = turtle.Screen()
+screen.setup(460, 460)
+screen.bgcolor("#111111")
+screen.title("Continuous Chase: Press R to Revive & Retry Stage")
+screen.tracer(0) 
+
+tile_size = 28
+game_over = False
+player_stuck = False  
+player_hp = 100
+current_stage = 1     
+last_facing = "right" 
+enemy_freeze_turns = 0  # 红魔被冰冻的剩余回合数
+
+# 三关无刷新嵌套大战略地图 (15x15)
+# G=大门, T=陷阱, S=电闸, 2=终点金块
+maze_map = [
+    ["1","1","1","1","1","1","1","1","1","1","1","1","1","1","1"],
+    ["1","0","0","0","0","0","1","1","0","0","0","0","0","2","1"],
+    ["1","0","1","0","1","1","0","1","G","1","1","1","G","1","1"], 
+    ["1","S","1","0","1","1","0","1","S","1","1","S","0","t","1"], 
+    ["1","1","1","0","1","1","1","1","0","1","1","0","0","0","1"],
+    ["1","0","0","0","0","0","0","0","0","1","1","0","0","0","1"],
+    ["1","0","1","1","1","0","0","1","1","1","1","1","0","0","1"],
+    ["1","0","S","0","0","0","0","0","0","0","0","0","0","T","1"],
+    ["1","1","1","0","1","1","1","0","1","1","1","0","1","1","1"],
+    ["1","0","0","0","1","1","0","0","0","1","1","0","0","0","1"],
+    ["1","0","1","1","1","1","1","0","1","1","1","1","1","0","1"],
+    ["1","0","0","0","0","1","1","0","1","1","0","0","0","0","1"], 
+    ["1","S","1","1","1","1","1","0","1","1","0","1","1","0","1"], 
+    ["1","0","0","0","0","0","0","0","0","0","0","0","0","0","1"],
+    ["1","1","1","1","1","1","1","1","1","1","1","1","1","1","1"]
+]
+
+# 各关卡的突变配置
+stage_2_mutations = [
+    (1, 8, "T"), (5, 1, "T"), (7, 2, "S"), (10, 1, "G"), (12, 1, "G"), (13, 2, "S"), (11, 13, "S"), (11, 1, "2")
+]
+
+stage_3_mutations = [
+    (1, 2, "T"), (1, 3, "T"), (4, 3, "1"), (5, 3, "1"), (6, 3, "1"), (9, 4, "1"), (9, 5, "1"), (9, 6, "1"), 
+    (13, 6, "S"), (1, 6, "S"), (2, 6, "G"), (4, 13, "2")
+]
+
+# 状态变量
+total_switches = 4
+switches_activated = 0
+gate_unlocked = False
+
+player_row, player_col = 1, 1
+enemy_row, enemy_col = 13, 2
+
+# 核心画笔定义
+drawer = turtle.Turtle()
+drawer.hideturtle()
+drawer.speed(0)
+
+msg_painter = turtle.Turtle()
+msg_painter.hideturtle()
+msg_painter.speed(0)
+
+# --- 2. 核心渲染函数 ---
+def grid_to_screen(col, row):
+    return -210 + (col * tile_size), 210 - (row * tile_size)
+
+def draw_square(col, row, color):
+    sx, sy = grid_to_screen(col, row)
+    drawer.penup()
+    drawer.goto(sx, sy)
+    drawer.setheading(0) 
+    drawer.color(color)
+    drawer.begin_fill()
+    for _ in range(4):
+        drawer.forward(tile_size - 1)
+        drawer.right(90)
+    drawer.end_fill()
+
+def draw_game():
+    drawer.clear()
+    for r in range(15):
+        for c in range(15):
+            if current_stage >= 2:
+                distance = abs(r - player_row) + abs(c - player_col)
+                if distance > 2:
+                    draw_square(c, r, "#111111") 
+                    continue 
+
+            tile = maze_map[r][c]
+            if tile == "1":
+                draw_square(c, r, "#34495e" if current_stage >= 2 else "navy")
+            elif tile == "2":
+                draw_square(c, r, "#f1c40f")
+            elif tile == "S":
+                draw_square(c, r, "#9b59b6")
+            elif tile == "G":
+                draw_square(c, r, "#1abc9c" if gate_unlocked else "#e67e22")
+            elif tile == "T":
+                draw_square(c, r, "#111111" if current_stage >= 2 else "darkgray")
+            else:
+                draw_square(c, r, "#111111" if current_stage >= 2 else "darkgray")
+
+    enemy_color = "#3498db" if enemy_freeze_turns > 0 else "#e74c3c"
+    draw_square(enemy_col, enemy_row, enemy_color)
+    draw_square(player_col, player_row, "#2ecc71")
+    screen.update()
+
+def show_all_map():
+    drawer.clear()
+    for r in range(15):
+        for c in range(15):
+            tile = maze_map[r][c]
+            if tile == "1": draw_square(c, r, "#34495e")
+            elif tile == "2": draw_square(c, r, "#f1c40f")
+            elif tile == "S": draw_square(c, r, "#9b59b6")
+            elif tile == "G": draw_square(c, r, "#1abc9c" if gate_unlocked else "#e67e22")
+            elif tile == "T": draw_square(c, r, "#e74c3c") 
+    draw_square(player_col, player_row, "#2ecc71")
+    enemy_color = "#3498db" if enemy_freeze_turns > 0 else "#e74c3c"
+    draw_square(enemy_col, enemy_row, enemy_color)
+    screen.update()
+
+# --- 3. 移动合法性与伤害机制 ---
+def can_move_to(row, col, is_player=True):
+    global player_stuck
+    if game_over: return False
+    
+    if is_player and player_stuck:
+        player_stuck = False
+        show_ui_message("STUCK! TURN SKIPPED", "#e74c3c")
+        game_loop(only_enemy=True)
+        return False
+
+    if 0 <= row < 15 and 0 <= col < 15:
+        tile = maze_map[row][col]
+        if tile == "1": return False
+        if tile == "G" and not gate_unlocked:
+            if is_player:
+                global player_hp
+                player_hp -= 60
+                show_ui_message("ZAP! Gate -60 HP", "#e67e22")
+                check_hp_dead()
+            return False
+        return True
+    return False
+
+def check_hp_dead():
+    global game_over
+    if player_hp <= 0 and not game_over:
+        game_over = True
+        show_all_map()
+        show_ui_message("DIED! Press 'R' to Respawn in STAGE " + str(current_stage), "#e74c3c")
+        return True
+    return False
+
+def check_game_status():
+    global game_over, switches_activated, gate_unlocked, player_stuck, player_hp, current_stage, total_switches
+    global player_row, player_col, enemy_row, enemy_col, last_facing, enemy_freeze_turns
+    if game_over: return
+
+    tile = maze_map[player_row][player_col]
+    
+    if tile == "T":
+        player_stuck = True
+        player_hp -= 10
+        maze_map[player_row][player_col] = "0"
+        show_ui_message("TRAP! STUCK & -10 HP", "#e74c3c")
+        check_hp_dead()
+    
+    elif tile == "S":
+        switches_activated += 1
+        maze_map[player_row][player_col] = "0"
+        if switches_activated == total_switches:
+            gate_unlocked = True
+            show_ui_message("GATE UNLOCKED!", "#1abc9c")
+
+    elif tile == "2":
+        if current_stage == 1:
+            current_stage = 2
+            player_hp += 100  
+            maze_map[player_row][player_col] = "0" 
+            player_row, player_col = 1, 1
+            enemy_row, enemy_col = 13, 2
+            last_facing = "right"
+            enemy_freeze_turns = 0
+            for r, c, val in stage_2_mutations:
+                maze_map[r][c] = val
+            total_switches = 3
+            switches_activated = 0
+            gate_unlocked = False
+            show_ui_message("STAGE 1 CLEAR! Reset Positions!", "#2ecc71")
+            draw_game()
+        elif current_stage == 2:
+            current_stage = 3
+            player_hp += 100  
+            maze_map[player_row][player_col] = "0" 
+            player_row, player_col = 1, 1
+            enemy_row, enemy_col = 13, 13
+            last_facing = "right"
+            enemy_freeze_turns = 0
+            for r, c, val in stage_3_mutations:
+                maze_map[r][c] = val
+            total_switches = 2
+            switches_activated = 0
+            gate_unlocked = False
+            show_ui_message("STAGE 2 CLEAR! Reset Positions!", "#2eccaa")
+            draw_game()
+        else:
+            game_over = True
+            show_all_map()
+            show_ui_message("Victory! THE CHOSEN RUNNER UNBROKEN!", "#2ecc71")
+        return
+
+    if player_row == enemy_row and player_col == enemy_col:
+        if enemy_freeze_turns <= 0:
+            enemy_freeze_turns = 5  
+            player_hp -= 20         
+            bounce_dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+            bounced = False
+            for dr, dc in bounce_dirs:
+                if can_move_to(player_row + dr, player_col + dc, is_player=False):
+                    player_row += dr
+                    player_col += dc
+                    bounced = True
+                    break
+            if not bounced: 
+                for dr, dc in bounce_dirs:
+                    if can_move_to(enemy_row + dr, enemy_col + dc, is_player=False):
+                        enemy_row += dr
+                        enemy_col += dc
+                        break
+            show_ui_message("BANG! Enemy Frozen for 5 Turns!", "#3498db")
+            check_hp_dead()
+
+def show_ui_message(text, color):
+    msg_painter.clear()
+    msg_painter.color(color)
+    msg_painter.penup()
+    msg_painter.goto(0, 185)
+    status_text = f"STAGE: {current_stage} | HP: {max(0, player_hp)} | DIR: {last_facing.upper()} | {text}"
+    msg_painter.write(status_text, align="center", font=("Arial", 11, "bold"))
+
+# --- 4. BFS 追击算法 ---
+def single_enemy_move():
+    global enemy_row, enemy_col, enemy_freeze_turns
+    if enemy_freeze_turns > 0:
+        enemy_freeze_turns -= 1
+        return
+
+    if enemy_row == player_row and enemy_col == player_col: return
+
+    queue = deque()
+    visited = set()
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    
+    for dr, dc in directions:
+        nr, nc = enemy_row + dr, enemy_col + dc
+        if can_move_to(nr, nc, is_player=False):
+            queue.append((nr, nc, (dr, dc)))
+            visited.add((nr, nc))
+
+    found_step = None
+    while queue:
+        curr_r, curr_c, first_step = queue.popleft()
+        if curr_r == player_row and curr_c == player_col:
+            found_step = first_step
+            break
+        for dr, dc in directions:
+            nr, nc = curr_r + dr, curr_c + dc
+            if (nr, nc) not in visited and can_move_to(nr, nc, is_player=False):
+                visited.add((nr, nc))
+                queue.append((nr, nc, first_step))
+
+    if found_step:
+        enemy_row += found_step[0]
+        enemy_col += found_step[1]
+
+# --- 5. E 键沙盒破墙互动系统 (已修复刷新) ---
+def use_pickaxe():
+    global player_row, player_col, game_over
+    if game_over or player_stuck: return
+
+    # 根据当前朝向计算要挖的目标格子
+    target_row, target_col = player_row, player_col
+    if last_facing == "up": target_row -= 1
+    elif last_facing == "down": target_row += 1
+    elif last_facing == "left": target_col -= 1
+    elif last_facing == "right": target_col += 1
+
+    # 不能破坏地图最外层的边界墙
+    if 0 < target_row < 14 and 0 < target_col < 14:
+        if maze_map[target_row][target_col] == "1":
+            maze_map[target_row][target_col] = "0"  # 碎墙
+            
+            # 强制重绘，确保墙立刻消失
+            draw_game() 
+            show_ui_message("WALL DESTROYED! 🧱❌", "#2ecc71")
+            
+            # 挖墙消耗一回合：触发红魔移动，并重新驱动主循环
+            game_loop(only_enemy=True)
+
+# --- 6. R键复活当前关卡机制 ---
+def reset_current_stage():
+    """玩家死亡后，按R键不回档第一关，直接就地满血复活挑战当前关卡"""
+    global game_over, player_hp, player_row, player_col, enemy_row, enemy_col
+    global last_facing, enemy_freeze_turns, switches_activated, gate_unlocked, total_switches
+    
+    if not game_over: return  
+    
+    game_over = False
+    player_hp = 100
+    enemy_freeze_turns = 0
+    player_stuck = False
+    last_facing = "right"
+    
+    if current_stage == 1:
+        player_row, player_col = 1, 1
+        enemy_row, enemy_col = 13, 2
+        total_switches = 4
+        switches_activated = 0
+        gate_unlocked = False
+        maze_map[3][1] = "S"; maze_map[3][8] = "S"; maze_map[3][11] = "S"; maze_map[7][2] = "S"
+        maze_map[2][8] = "G"; maze_map[13][13] = "2"
+        
+    elif current_stage == 2:
+        player_row, player_col = 1, 1
+        enemy_row, enemy_col = 13, 2
+        total_switches = 3
+        switches_activated = 0
+        gate_unlocked = False
+        for r, c, val in stage_2_mutations:
+            maze_map[r][c] = val
+            
+    elif current_stage == 3:
+        player_row, player_col = 1, 1
+        enemy_row, enemy_col = 13, 13
+        total_switches = 2
+        switches_activated = 0
+        gate_unlocked = False
+        for r, c, val in stage_3_mutations:
+            maze_map[r][c] = val
+            
+    draw_game()
+    show_ui_message(f"REVIVED! Retrying STAGE {current_stage}...", "#2ecc71")
+
+# --- 7. 核心游戏循环驱动 ---
+def game_loop(only_enemy=False):
+    global game_over
+    if game_over: return
+
+    if not only_enemy:
+        check_game_status()
+        if game_over: return
+    
+    single_enemy_move()
+    check_game_status() 
+    
+    if not game_over:
+        draw_game()
+        if enemy_freeze_turns > 0:
+            show_ui_message(f"【RED FROZEN! ({enemy_freeze_turns})】 Safe time!", "#3498db")
+        elif player_stuck:
+            show_ui_message("TRAP! STUCK FOR 1 TURN!", "#e74c3c")
+        elif not gate_unlocked:
+            show_ui_message(f"Find {total_switches - switches_activated} switches!", "#ffffff")
+        else:
+            show_ui_message("GATE UNLOCKED! ESCAPE NOW!", "#1abc9c")
+
+# --- 8. 键盘响应与朝向更新 ---
+def move_up():
+    global last_facing, player_row
+    last_facing = "up"
+    if can_move_to(player_row - 1, player_col):
+        player_row -= 1
+        game_loop()
+    else:
+        if not game_over: draw_game(); show_ui_message(f"Facing UP. Press E to Mine!", "#ffffff")
+
+def move_down():
+    global last_facing, player_row
+    last_facing = "down"
+    if can_move_to(player_row + 1, player_col):
+        player_row += 1
+        game_loop()
+    else:
+        if not game_over: draw_game(); show_ui_message(f"Facing DOWN. Press E to Mine!", "#ffffff")
+
+def move_left():
+    global last_facing, player_col
+    last_facing = "left"
+    if can_move_to(player_row, player_col - 1):
+        player_col -= 1
+        game_loop()
+    else:
+        if not game_over: draw_game(); show_ui_message(f"Facing LEFT. Press E to Mine!", "#ffffff")
+
+def move_right():
+    global last_facing, player_col
+    last_facing = "right"
+    if can_move_to(player_row, player_col + 1):
+        player_col += 1
+        game_loop()
+    else:
+        if not game_over: draw_game(); show_ui_message(f"Facing RIGHT. Press E to Mine!", "#ffffff")
+
+screen.listen()
+screen.onkey(move_up, "w")
+screen.onkey(move_up, "W")
+screen.onkey(move_down, "s")
+screen.onkey(move_down, "S")
+screen.onkey(move_left, "a")
+screen.onkey(move_left, "A")
+screen.onkey(move_right, "d")
+screen.onkey(move_right, "D")
+
+screen.onkey(use_pickaxe, "e")
+screen.onkey(use_pickaxe, "E")
+
+screen.onkey(reset_current_stage, "r")
+screen.onkey(reset_current_stage, "R")
+
+# 开局渲染
+draw_game()
+show_ui_message("STAGE 1: 4 SWITCHES! WASD to Move, E to Mine!", "#ffffff")
+turtle.done()
