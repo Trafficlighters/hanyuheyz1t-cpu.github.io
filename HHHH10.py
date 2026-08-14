@@ -29,6 +29,8 @@ draw_borders()
 player = turtle.Turtle()
 player.shape("square")
 player.color("green")
+player.color("yellow")
+player.color("blue")
 player.penup()
 player.speed(0)
 player.goto(-200, 200)
@@ -44,6 +46,78 @@ for i in range(3):
     en.speed(0)
     en.goto(150 + i * 30, -150)
     enemies.append(en)
+
+# 15x15 宏大世界地图
+original_map = [
+    ["1","P","1","1","1","1","1","1","1","1","1","1","1","1","1"],
+    ["1","0","0","1","1","1","B","T","0","1","1","0","0","2","1"], 
+    ["1","0","1","1","1","1","0","1","0","1","1","0","1","1","1"], 
+    ["1","0","1","1","1","1","0","1","0","1","1","0","1","0","1"], 
+    ["1","0","1","1","1","1","1","1","0","1","1","0","1","0","1"], 
+    ["1","0","1","0","1","1","0","0","0","0","0","0","0","0","1"], 
+    ["1","0","1","0","0","1","0","0","1","1","1","1","1","0","1"], 
+    ["1","0","1","1","0","1","0","0","0","1","1","0","0","0","1"], 
+    ["1","0","1","1","1","1","0","0","1","1","1","0","1","1","1"], 
+    ["P","0","1","1","1","1","0","0","0","1","1","0","0","0","1"], 
+    ["1","0","1","1","1","1","1","0","1","1","1","0","0","0","1"], 
+    ["1","0","1","1","1","1","1","0","1","1","S","0","0","0","1"], 
+    ["1","0","1","1","1","1","1","0","1","1","0","1","1","1","1"], 
+    ["1","0","0","0","1","0","0","0","0","0","0","0","0","0","1"], 
+    ["1","1","1","1","1","1","1","1","1","1","1","1","1","1","1"]
+]
+
+
+# --- 2. 核心判定与随机陷阱刷新 ---
+def get_current_room(col):
+    if col <= 4: return 1
+    elif 5 <= col <= 9: return 2
+    else: return 3
+
+def grid_to_screen(col, row):
+    return -210 + (col * tile_size), 210 - (row * tile_size)
+
+def draw_square(col, row, color):
+    sx, sy = grid_to_screen(col, row)
+    drawer.penup()
+    drawer.goto(sx, sy)
+    drawer.setheading(0) 
+    drawer.color(color)
+    drawer.begin_fill()
+    for _ in range(4):
+        drawer.forward(tile_size - 1)
+        drawer.right(90)
+    drawer.end_fill()
+
+def randomize_hazards():
+    """硬核：每次行动动态搅乱地图陷阱"""
+    global maze_map
+    for r in range(1, 14):
+        for c in range(1, 14):
+            if original_map[r][c] in ("T", "X") and maze_map[r][c] in ("0", "T", "X"):
+                maze_map[r][c] = random.choice(["T", "X", "0"])
+
+def draw_game():
+    drawer.clear()
+    for r in range(15):
+        for c in range(15):
+            tile_room = get_current_room(c)
+            distance = abs(r - player_row) + abs(c - player_col)
+            
+            if tile_room == 2 and distance > 2:
+                draw_square(c, r, "#111111")
+                continue
+            if tile_room == 3:
+                if room3_light_mode == 0:
+                    draw_square(c, r, "#111111")
+                    continue
+                elif room3_light_mode == 1 and distance > 2:
+                    draw_square(c, r, "#111111")
+                    continue
+
+            tile = maze_map[r][c]
+            if tile == "1": draw_square(c, r, "#2c3e50")       
+            elif tile == "2": draw_square(c, r, "#f1c40f") 
+            elif tile == "0": draw_square(c, r, "#222222")   
 
 # ----------------- 游戏状态变量 -----------------
 score = 0

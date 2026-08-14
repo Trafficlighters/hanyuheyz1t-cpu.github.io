@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Three Chambers</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; background: #101426; color: #f6f7fb; }
+    main { width: min(940px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 40px; }
+    header, .status, .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    header { justify-content: space-between; margin-bottom: 18px; }
+    h1, p { margin: 0; }
+    h1 { font-size: 1.45rem; }
+    a, button { border: 0; border-radius: 6px; padding: 9px 12px; background: #2a385d; color: #fff; font: inherit; font-weight: 650; text-decoration: none; cursor: pointer; }
+    button { background: #5e76e6; }
+    .game { display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 18px; align-items: start; }
+    canvas { display: block; width: 100%; max-width: 640px; aspect-ratio: 1; background: #0b0f1d; border: 1px solid #41527e; image-rendering: pixelated; }
+    .panel { display: grid; gap: 14px; padding: 16px; background: #1a2340; border: 1px solid #41527e; }
+    .status { color: #d9f9e9; min-height: 2.5em; }
+    .hint { color: #bfc9e3; font-size: .9rem; line-height: 1.5; }
+    kbd { padding: 2px 5px; border: 1px solid #59698f; border-radius: 3px; background: #101426; font-family: inherit; }
+    @media (max-width: 680px) { .game { grid-template-columns: 1fr; } canvas { max-width: none; } .panel { grid-template-columns: 1fr auto; } .hint { grid-column: 1 / -1; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><a href="index.html">Back to levels</a><h1 id="title">Three Chambers</h1><button type="button" id="restart">Restart</button></header>
+    <section class="game" aria-label="Maze game">
+      <canvas id="board" width="600" height="600" aria-label="Maze board"></canvas>
+      <aside class="panel">
+        <p class="status" id="status" aria-live="polite"></p>
+        <p class="hint">Move: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrow keys<br>Push: <kbd>Q</kbd><br>Break one wall: <kbd>E</kbd><br>Restart: <kbd>R</kbd></p>
+      </aside>
+    </section>
+  </main>
+  <script>
+    const levelNames = [
+      'Power Grid', 'Pure Chase', 'Frozen Orb', 'Power Grid Plus', 'Shield & Barrier',
+      'Code Gate', 'Final Gate', 'Final Gate Plus', 'Hell Mode', 'Hell Mode: Finale'
+    ];
+    const requestedLevel = Number(new URLSearchParams(location.search).get('level'));
+    const level = Number.isInteger(requestedLevel) && requestedLevel >= 1 && requestedLevel <= 10 ? requestedLevel : 1;
+    const canvas = document.querySelector('#board');
+    const context = canvas.getContext('2d');
+    const status = document.querySelector('#status');
+    document.querySelector('#title').textContent = `HHHH${level}: ${levelNames[level - 1]}`;
+
+    const finaleLayout = [
+      '###############', '#.............#', '#.............#', '#.............#', '#.............#',
+      '#.............#', '#.............#', '#.............#', '#.............#', '#.............#',
+      '#.............#', '#.............#', '#.............#', '#............2#', '###############'
+    ];
+    const size = 15;
+    const tile = canvas.width / size;
+    const profiles = {
+      1: { hp: 30, freeze: 4, spike: 5, contact: 'death' },
+      2: { hp: 100, freeze: 5, spike: 10, contact: 'combat', gateDamage: 60 },
+      3: { hp: 100, freeze: 5, spike: 10, contact: 'combat', gateDamage: 60 },
+      4: { hp: 100, freeze: 4, spike: 5, contact: 'death' },
+      5: { hp: 100, freeze: 4, spike: 20, contact: 'damage', pickaxe: true },
+      6: { hp: 100, freeze: 10, spike: 10, contact: 'damage' },
+      7: { hp: 100, freeze: 3, spike: 20, contact: 'damage', pickaxe: true, split: true },
+      8: { hp: 100, freeze: 3, spike: 25, contact: 'damage', pickaxe: true, split: true },
+      9: { hp: 1000, freeze: 3, spike: 25, contact: 'damage', pickaxe: true, split: true },
+      10: { hp: 1, freeze: 0, spike: 0, contact: 'death', arena: true }
+    };
+    const profile = profiles[level];
+    let layout = finaleLayout;
+    let state;
+    let arenaTimer;
+
+    function pointsFor(symbol) {
+      const points = [];
+      layout.forEach((row, rowIndex) => row.forEach((cell, colIndex) => {
+        if (cell === symbol) points.push({ row: rowIndex, col: colIndex });
+      }));
+      return points;
+    }
+    function firstOpenPoint() { return pointsFor('.').at(0) || { row: 1, col: 1 }; }
+    function statePointsFor(symbol) {
+      const points = [];
+      state.walls.forEach((row, rowIndex) => row.forEach((cell, colIndex) => {
+        if (cell === symbol) points.push({ row: rowIndex, col: colIndex });
+      }));
+      return points;
+    }
+    function addPasswordPuzzle() {
+      const reachable = new Set([key(state.player.row, state.player.col)]);
+      const queue = [{ ...state.player }];
+      for (let index = 0; index < queue.length; index += 1) {
+        const point = queue[index];
+        for (const [row, col] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const next = { row: point.row + row, col: point.col + col };
+          if (next.row >= 0 && next.row < size && next.col >= 0 && next.col < size && state.walls[next.row][next.col] !== '#' && !reachable.has(key(next.row, next.col))) {
+            reachable.add(key(next.row, next.col));
+            queue.push(next);
+          }
+        }
+      }
+      const candidates = queue.filter(point => state.walls[point.row][point.col] === '.' && !same(point, state.player) && !same(point, state.exit));
+      if (!statePointsFor('I').length && candidates.length) {
+        const note = candidates[Math.floor(candidates.length / 3)];
+        state.walls[note.row][note.col] = 'I';
+      }
+      if (!statePointsFor('C').length && candidates.length > 1) {
+        const gate = candidates[Math.floor(candidates.length * 2 / 3)];
+        state.walls[gate.row][gate.col] = 'C';
+      }
+    }
+    function parseMaze(source) {
+      const declaration = source.match(/(?:original_map|maze_map)\s*=\s*\[/);
+      if (!declaration) return null;
+      const mapText = source.slice(declaration.index, source.indexOf('\n]', declaration.index) + 2);
+      const cells = [...mapText.matchAll(/["']([^"']+)["']/g)].map(match => match[1]);
+      if (cells.length < size * size) return null;
+      return Array.from({ length: size }, (_, row) => cells.slice(row * size, (row + 1) * size).map(cell => cell === '1' ? '#' : cell[0]));
+    }
+    async function loadLevel() {
+      if (level === 10) { layout = finaleLayout.map(row => row.split('')); reset(); return; }
+      try {
+        const response = await fetch(`HHHH${level}.py`);
+        if (!response.ok) throw new Error('source not found');
+        const parsed = parseMaze(await response.text());
+        if (!parsed) throw new Error('maze data not found');
+        layout = parsed;
+        reset();
+      } catch (error) {
+        layout = finaleLayout.map(row => row.split(''));
+        reset('Could not load this level map; the finale arena is shown instead.');
+      }
+    }
+    function reset() {
+      clearInterval(arenaTimer);
+      const start = firstOpenPoint();
+      const exit = pointsFor('2').at(0) || pointsFor('C').at(0) || { row: 13, col: 13 };
+      const switchLocations = pointsFor('S');
+      const arenaEnemies = Array.from({ length: size - 2 }, (_, index) => ({ row: 1, col: index + 1 }));
+      state = {
+        walls: layout.map(row => [...row]), exit, switchLocations,
+        player: profile.arena ? { row: 2, col: 1 } : { ...start },
+        enemies: profile.arena ? arenaEnemies : [{ row: 13, col: 13 }],
+        switches: new Set(), hp: profile.hp, enemyHp: 100, freeze: 0, hasKey: false, hasPickaxe: false, readPaper: false,
+        password: String(Math.floor(1000 + Math.random() * 9000)),
+        trapActive: level >= 7, portalCooldown: false, lastDirection: [0, 1], over: false, won: false,
+        message: switchLocations.length ? 'Activate the blue switches, then reach the gold exit.' : 'Reach the gold exit.'
+      };
+      if (!profile.arena) addPasswordPuzzle();
+      render();
+      if (profile.arena) arenaTimer = setInterval(() => {
+        if (state.over || state.won) return;
+        advanceEnemies();
+        render();
+      }, 750);
+    }
+    function key(row, col) { return `${row},${col}`; }
+    function isWall(row, col, enemy = false) {
+      if (row < 0 || row >= size || col < 0 || col >= size) return true;
+      const cell = state.walls[row][col];
+      return cell === '#' || (enemy && ['K', 'B', 'S', '2', 'P', 'G', 'D', 'W', 'C'].includes(cell));
+    }
+    function isGate(row, col) { return state.walls[row]?.[col] === 'G' && state.switches.size < state.switchLocations.length; }
+    function same(a, b) { return a.row === b.row && a.col === b.col; }
+    function moveEnemy(enemy) {
+      const queue = [{ row: enemy.row, col: enemy.col }];
+      const parent = new Map([[key(enemy.row, enemy.col), null]]);
+      for (let index = 0; index < queue.length; index += 1) {
+        const point = queue[index];
+        if (same(point, state.player)) {
+          let step = point;
+          while (parent.get(key(step.row, step.col)) && !same(parent.get(key(step.row, step.col)), enemy)) step = parent.get(key(step.row, step.col));
+          if (!same(step, enemy)) Object.assign(enemy, step);
+          return;
+        }
+        for (const [row, col] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const next = { row: point.row + row, col: point.col + col };
+          if (!isWall(next.row, next.col, true) && !parent.has(key(next.row, next.col))) { parent.set(key(next.row, next.col), point); queue.push(next); }
+        }
+      }
+    }
+    function advanceEnemies() {
+      if (state.freeze > 0) { state.freeze -= 1; return; }
+      const turns = 1;
+      for (let turn = 0; turn < turns; turn += 1) state.enemies.forEach(moveEnemy);
+      const hits = state.enemies.filter(enemy => same(enemy, state.player)).length;
+      if (hits) {
+        if (profile.contact === 'death') { state.over = true; state.message = 'Caught by the enemy. Press R or Restart to try again.'; return; }
+        const damage = profile.contact === 'combat' ? 20 : 0.1 * hits;
+        state.hp -= damage;
+        if (profile.contact === 'combat') { state.enemyHp -= 10; state.freeze = 10; }
+        state.message = `The red block hit you. -${damage} HP`;
+        if (state.hp <= 0) { state.hp = 0; state.over = true; state.message = 'Game over. Press R or Restart to try again.'; }
+      }
+    }
+    function clearCurrentTile() { state.walls[state.player.row][state.player.col] = '.'; }
+    function resolveTile() {
+      let cell = state.walls[state.player.row][state.player.col];
+      if (cell === 'K') { state.hasKey = true; clearCurrentTile(); state.message = 'Key collected.'; }
+      if (cell === 'I') { state.readPaper = true; state.message = `Discarded note: Security Code is ${state.password}.`; }
+      if (cell === 'M') { state.hasPickaxe = true; clearCurrentTile(); state.message = 'Pickaxe collected. Press E to break a wall.'; }
+      if (cell === 'B') { clearCurrentTile(); state.message = 'Master power box activated.'; }
+      if (cell === 'S') { state.switches.add(key(state.player.row, state.player.col)); clearCurrentTile(); state.message = `Switch activated (${state.switches.size}/${state.switchLocations.length}).`; }
+      if (cell === 'F' || cell === 'O') { state.freeze = profile.freeze; clearCurrentTile(); state.message = `Enemy frozen for ${profile.freeze} turns.`; }
+      if (cell === 'T') { state.hp -= profile.spike; clearCurrentTile(); state.message = `Spike trap. -${profile.spike} HP`; }
+      if (cell === 'X' && state.trapActive) { state.hp -= level >= 6 ? 30 : 15; state.player = { row: 1, col: level === 6 ? 3 : 1 }; state.message = 'Mine exploded. You were sent back.'; }
+      if (cell === 'P' && !state.portalCooldown) {
+        const portals = pointsFor('P'); const destination = portals.find(point => !same(point, state.player));
+        if (destination) state.player = { ...destination }; state.portalCooldown = true; return;
+      }
+      state.portalCooldown = cell === 'P';
+      if (state.hp <= 0) { state.hp = 0; state.over = true; state.message = 'Game over. Press R or Restart to try again.'; }
+    }
+    function move(rowDelta, colDelta) {
+      if (state.over || state.won) return;
+      const next = { row: state.player.row + rowDelta, col: state.player.col + colDelta };
+      if (isWall(next.row, next.col)) { state.message = 'A wall blocks the way.'; return render(); }
+      state.lastDirection = [rowDelta, colDelta];
+      const nextTile = state.walls[next.row][next.col];
+      if (nextTile === 'D' && !state.hasKey) { state.message = 'This door needs a key.'; return render(); }
+      if (nextTile === 'D') { state.hasKey = false; state.walls[next.row][next.col] = '.'; }
+      if (nextTile === 'C') {
+        if (prompt('Enter the 4-digit security code:') !== state.password) { state.message = 'Code gate denied.'; return render(); }
+        state.walls[next.row][next.col] = '.';
+      }
+      if (isGate(next.row, next.col)) { state.message = `The gate needs all ${state.switchLocations.length} switches.`; return render(); }
+      state.player = next;
+      state.trapActive = !state.trapActive;
+      resolveTile();
+      if (same(state.player, state.exit) && state.switches.size === state.switchLocations.length) { state.won = true; state.message = `HHHH${level} complete!`; return render(); }
+      if (!profile.arena) advanceEnemies();
+      render();
+    }
+    function push() {
+      if (state.over || state.won) return;
+      const nearby = state.enemies.find(enemy => Math.abs(enemy.row - state.player.row) + Math.abs(enemy.col - state.player.col) === 1);
+      if (!nearby) { state.message = 'No adjacent enemy to push.'; return render(); }
+      const rowDelta = nearby.row - state.player.row;
+      const colDelta = nearby.col - state.player.col;
+      const target = { row: nearby.row + rowDelta, col: nearby.col + colDelta };
+      if (!isWall(target.row, target.col)) Object.assign(nearby, target);
+      if (profile.split && state.enemies.length < 4) state.enemies.push({ row: nearby.row - rowDelta, col: nearby.col - colDelta });
+      state.freeze = 1;
+      state.message = profile.split ? 'Enemy pushed back and split.' : 'Enemy pushed back.';
+      render();
+    }
+    function breakWall() {
+      if (state.over || state.won) return;
+      if (!profile.pickaxe || !state.hasPickaxe) { state.message = 'You need the pickaxe first.'; return render(); }
+      const candidates = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+      const wall = candidates.map(([row, col]) => ({ row: state.player.row + row, col: state.player.col + col })).find(point => isWall(point.row, point.col) && point.row > 0 && point.row < size - 1 && point.col > 0 && point.col < size - 1);
+      if (wall) { state.walls[wall.row][wall.col] = '.'; state.message = 'Wall cleared.'; } else state.message = 'No wall beside you.';
+      render();
+    }
+    function render() {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      for (let row = 0; row < size; row += 1) for (let col = 0; col < size; col += 1) {
+        context.fillStyle = state.walls[row][col] === '#' ? '#445071' : '#151d33';
+        context.fillRect(col * tile, row * tile, tile - 1, tile - 1);
+      }
+      state.switchLocations.forEach(point => {
+        context.fillStyle = state.switches.has(key(point.row, point.col)) ? '#76e4b3' : '#4590dd';
+        context.fillRect(point.col * tile + tile * .2, point.row * tile + tile * .2, tile * .6, tile * .6);
+      });
+      const tokens = { K: '#f2c94c', D: '#c58a4b', G: '#7f6de3', T: '#db5b65', F: '#5bbde6', P: '#c05be6', M: '#9ca5b5', B: '#68b7a7', X: '#d36d4c', C: '#f2c94c', I: '#bd7ee6', W: '#465a84' };
+      for (let row = 0; row < size; row += 1) for (let col = 0; col < size; col += 1) {
+        const color = tokens[state.walls[row][col]];
+        if (color) { context.fillStyle = color; context.fillRect(col * tile + tile * .28, row * tile + tile * .28, tile * .44, tile * .44); }
+      }
+      context.fillStyle = state.switches.size === state.switchLocations.length ? '#f2c94c' : '#785d23';
+      context.fillRect(state.exit.col * tile + tile * .18, state.exit.row * tile + tile * .18, tile * .64, tile * .64);
+      state.enemies.forEach(enemy => { context.fillStyle = '#e04f5f'; context.fillRect(enemy.col * tile + tile * .16, enemy.row * tile + tile * .16, tile * .68, tile * .68); });
+      context.fillStyle = '#76e4b3';
+      context.fillRect(state.player.col * tile + tile * .16, state.player.row * tile + tile * .16, tile * .68, tile * .68);
+      const items = `${state.hasKey ? ' | Key' : ''}${state.hasPickaxe ? ' | Pickaxe' : ''}${state.readPaper ? ` | Note ${state.password}` : ''}`;
+      const enemyInfo = profile.contact === 'combat' ? ` | Red HP ${state.enemyHp}` : '';
+      status.textContent = `HP ${Math.max(0, state.hp)} | Switches ${state.switches.size}/${state.switchLocations.length}${items}${enemyInfo} | ${state.message}`;
+    }
+    document.addEventListener('keydown', event => {
+      const moves = { ArrowUp: [-1, 0], w: [-1, 0], W: [-1, 0], ArrowDown: [1, 0], s: [1, 0], S: [1, 0], ArrowLeft: [0, -1], a: [0, -1], A: [0, -1], ArrowRight: [0, 1], d: [0, 1], D: [0, 1] };
+      if (moves[event.key]) { event.preventDefault(); move(...moves[event.key]); }
+      else if (event.key === 'q' || event.key === 'Q') push();
+      else if (event.key === 'e' || event.key === 'E') breakWall();
+      else if (event.key === 'r' || event.key === 'R') reset();
+    });
+    document.querySelector('#restart').addEventListener('click', reset);
+    loadLevel();
+  </script>
+</body>
+</html>
